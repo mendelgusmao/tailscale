@@ -41,6 +41,7 @@ type settings struct {
 	// node FQDN.
 	TailnetTargetFQDN             string
 	ServeConfigPath               string
+	SimpleServeConfig             string
 	DaemonExtraArgs               string
 	ExtraArgs                     string
 	InKubernetes                  bool
@@ -82,6 +83,7 @@ func configFromEnv() (*settings, error) {
 		Hostname:                              defaultEnv("TS_HOSTNAME", ""),
 		Routes:                                defaultEnvStringPointer("TS_ROUTES"),
 		ServeConfigPath:                       defaultEnv("TS_SERVE_CONFIG", ""),
+		SimpleServeConfig:                     defaultEnv("TS_SIMPLE_SERVE_CONFIG", ""),
 		ProxyTargetIP:                         defaultEnv("TS_DEST_IP", ""),
 		ProxyTargetDNSName:                    defaultEnv("TS_EXPERIMENTAL_DEST_DNS_NAME", ""),
 		TailnetTargetIP:                       defaultEnv("TS_TAILNET_TARGET_IP", ""),
@@ -110,6 +112,7 @@ func configFromEnv() (*settings, error) {
 		EgressSvcsCfgPath:                     defaultEnv("TS_EGRESS_SERVICES_CONFIG_PATH", ""),
 		PodUID:                                defaultEnv("POD_UID", ""),
 	}
+
 	podIPs, ok := os.LookupEnv("POD_IPS")
 	if ok {
 		ips := strings.Split(podIPs, ",")
@@ -171,7 +174,7 @@ func (s *settings) validate() error {
 	if s.AllowProxyingClusterTrafficViaIngress && s.UserspaceMode {
 		return errors.New("EXPERIMENTAL_ALLOW_PROXYING_CLUSTER_TRAFFIC_VIA_INGRESS is not supported in userspace mode")
 	}
-	if s.AllowProxyingClusterTrafficViaIngress && s.ServeConfigPath == "" {
+	if s.AllowProxyingClusterTrafficViaIngress && (s.ServeConfigPath == "" && s.SimpleServeConfig == "") {
 		return errors.New("EXPERIMENTAL_ALLOW_PROXYING_CLUSTER_TRAFFIC_VIA_INGRESS is set but this is not a cluster ingress proxy")
 	}
 	if s.AllowProxyingClusterTrafficViaIngress && s.PodIP == "" {
