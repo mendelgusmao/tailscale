@@ -358,7 +358,7 @@ authLoop:
 
 	// Remove any serve config and advertised HTTPS endpoint that may have been set by a previous run of
 	// containerboot, but only if we're providing a new one.
-	if cfg.ServeConfigPath != "" {
+	if cfg.ServeConfigPath != "" || cfg.SimpleServeConfig != "" {
 		log.Printf("serve proxy: unsetting previous config")
 		if err := client.SetServeConfig(ctx, new(ipn.ServeConfig)); err != nil {
 			return fmt.Errorf("failed to unset serve config: %w", err)
@@ -589,7 +589,7 @@ runLoop:
 					resetTimer(false)
 					backendAddrs = newBackendAddrs
 				}
-				if cfg.ServeConfigPath != "" {
+				if cfg.ServeConfigPath != "" || cfg.SimpleServeConfig != "" {
 					cd := certDomainFromNetmap(n.NetMap)
 					if cd == "" {
 						cd = kubetypes.ValueNoHTTPS
@@ -614,7 +614,7 @@ runLoop:
 				// enabled, set up proxy rule each time the
 				// tailnet IPs of this node change (including
 				// the first time they become available).
-				if cfg.AllowProxyingClusterTrafficViaIngress && cfg.ServeConfigPath != "" && ipsHaveChanged && len(addrs) != 0 {
+				if cfg.AllowProxyingClusterTrafficViaIngress && (cfg.ServeConfigPath != "" || cfg.SimpleServeConfig != "") && ipsHaveChanged && len(addrs) != 0 {
 					log.Printf("installing rules to forward traffic for %s to node's tailnet IP", cfg.PodIP)
 					if err := installTSForwardingRuleForDestination(ctx, cfg.PodIP, addrs, nfr); err != nil {
 						return fmt.Errorf("installing rules to forward traffic to node's tailnet IP: %w", err)
@@ -646,7 +646,13 @@ runLoop:
 
 				if cfg.ServeConfigPath != "" {
 					triggerWatchServeConfigChanges.Do(func() {
-						go watchServeConfigChanges(ctx, cfg.ServeConfigPath, certDomainChanged, certDomain, client, kc)
+						go watchServeConfigChanges(ctx, cfg.ServeConfigPath, "", certDomainChanged, certDomain, client, kc)
+					})
+				}
+
+				if cfg.SimpleServeConfig != "" {
+					triggerWatchServeConfigChanges.Do(func() {
+						go watchServeConfigChanges(ctx, "", cfg.SimpleServeConfig, certDomainChanged, certDomain, client, kc)
 					})
 				}
 
