@@ -9,10 +9,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -70,9 +73,20 @@ func watchServeConfigChanges(ctx context.Context, cdChanged <-chan bool, certDom
 			// k8s handles these mounts. So just re-read the file and apply it
 			// if it's changed.
 		}
-		sc, err := readServeConfig(cfg.ServeConfigPath, certDomain)
-		if err != nil {
-			log.Fatalf("serve proxy: failed to read serve config: %v", err)
+		var (
+			sc  *ipn.ServeConfig
+			err error
+		)
+		if cfg.ServeConfigPath != "" {
+			sc, err = readServeConfig(cfg.ServeConfigPath, certDomain)
+			if err != nil {
+				log.Fatalf("serve proxy: failed to read serve config: %v", err)
+			}
+		} else if cfg.SimpleServeConfig != "" {
+			sc, err = readSimpleServeConfig(cfg.SimpleServeConfig, certDomain)
+			if err != nil {
+				log.Fatalf("serve proxy: failed to parse simple serve config: %v", err)
+			}
 		}
 		if sc == nil {
 			log.Printf("serve proxy: no serve config at %q, skipping", cfg.ServeConfigPath)
@@ -168,4 +182,77 @@ func readServeConfig(path, certDomain string) (*ipn.ServeConfig, error) {
 		return nil, err
 	}
 	return &sc, nil
+}
+
+// readSimpleServeConfig reads the ipn.ServeConfig from config string
+func readSimpleServeConfig(config, certDomain string) (*ipn.ServeConfig, error) {
+	const (
+		funnel              = "funnel"
+		invalidValueMessage = "invalid funnel port (only 443, 8443 and 10000 are allowed): %s"
+	)
+
+	var funnelMapping = map[string]int{
+		"funnel":      443,
+		"funnel443":   443,
+		"funnel8443":  8443,
+		"funnel10000": 10000,
+	}
+
+	if config == "" {
+		return nil, nil
+	}
+
+	uri, err := url.Parse(config)
+
+	if err != nil {
+		return nil, err
+	}
+
+	port := 443
+	allowFunnel := false
+	schemeParts := strings.Split(uri.Scheme, "+")
+
+	if len(schemeParts) == 2 && strings.HasPrefix(schemeParts[0], funnel) {
+		funnelValue := schemeParts[0]
+		ok := false
+
+		if port, ok = funnelMapping[funnelValue]; !ok {
+			return nil, fmt.Errorf(invalidValueMessage, funnelValue)
+		}
+
+		allowFunnel = true
+		uri.Scheme = schemeParts[1]
+	}
+
+	path := "/"
+
+	if uri.Path != "" {
+		path = uri.Path
+		uri.Path = ""
+	}
+
+	target := uri.String()
+	hostPort := ipn.HostPort(fmt.Sprintf("%s:%d", certDomain, port))
+
+	sc := &ipn.ServeConfig{
+		TCP: map[uint16]*ipn.TCPPortHandler{
+			uint16(port): {
+				HTTPS: true,
+			},
+		},
+		Web: map[ipn.HostPort]*ipn.WebServerConfig{
+			hostPort: {
+				Handlers: map[string]*ipn.HTTPHandler{
+					path: {
+						Proxy: target,
+					},
+				},
+			},
+		},
+		AllowFunnel: map[ipn.HostPort]bool{
+			hostPort: allowFunnel,
+		},
+	}
+
+	return sc, nil
 }
