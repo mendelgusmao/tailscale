@@ -41,6 +41,7 @@ type settings struct {
 	// node FQDN.
 	TailnetTargetFQDN             string
 	ServeConfigPath               string
+	SimpleServeConfigs            []string
 	DaemonExtraArgs               string
 	ExtraArgs                     string
 	InKubernetes                  bool
@@ -89,6 +90,7 @@ func configFromEnv() (*settings, error) {
 		Hostname:                              defaultEnv("TS_HOSTNAME", ""),
 		Routes:                                defaultEnvStringPointer("TS_ROUTES"),
 		ServeConfigPath:                       defaultEnv("TS_SERVE_CONFIG", ""),
+		SimpleServeConfigs:                    envSliceFromPrefix("TS_SIMPLE_SERVE_CONFIG"),
 		ProxyTargetIP:                         defaultEnv("TS_DEST_IP", ""),
 		ProxyTargetDNSName:                    defaultEnv("TS_EXPERIMENTAL_DEST_DNS_NAME", ""),
 		TailnetTargetIP:                       defaultEnv("TS_TAILNET_TARGET_IP", ""),
@@ -223,6 +225,7 @@ func (s *settings) validate() error {
 			return fmt.Errorf("error validating tailscaled configfile contents: %w", err)
 		}
 	}
+	notUsingServeConfig := s.ServeConfigPath == "" && len(s.SimpleServeConfigs) == 0
 	if s.ProxyTargetIP != "" && s.UserspaceMode {
 		return errors.New("TS_DEST_IP is not supported with TS_USERSPACE")
 	}
@@ -247,7 +250,7 @@ func (s *settings) validate() error {
 	if s.AllowProxyingClusterTrafficViaIngress && s.UserspaceMode {
 		return errors.New("EXPERIMENTAL_ALLOW_PROXYING_CLUSTER_TRAFFIC_VIA_INGRESS is not supported in userspace mode")
 	}
-	if s.AllowProxyingClusterTrafficViaIngress && s.ServeConfigPath == "" {
+	if s.AllowProxyingClusterTrafficViaIngress && notUsingServeConfig {
 		return errors.New("EXPERIMENTAL_ALLOW_PROXYING_CLUSTER_TRAFFIC_VIA_INGRESS is set but this is not a cluster ingress proxy")
 	}
 	if s.AllowProxyingClusterTrafficViaIngress && s.PodIP == "" {
@@ -440,4 +443,19 @@ func defaultBool(name string, defVal bool) bool {
 		return defVal
 	}
 	return ret
+}
+
+// envSliceFromPrefix returns all values from env vars whose names are prefixed by prefix
+func envSliceFromPrefix(prefix string) []string {
+	values := make([]string, 0)
+
+	for _, env := range os.Environ() {
+		parts := strings.SplitN(env, "=", 2)
+
+		if strings.HasPrefix(parts[0], prefix) {
+			values = append(values, parts[1])
+		}
+	}
+
+	return values
 }
