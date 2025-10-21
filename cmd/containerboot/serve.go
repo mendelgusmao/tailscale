@@ -9,10 +9,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -70,9 +75,20 @@ func watchServeConfigChanges(ctx context.Context, cdChanged <-chan bool, certDom
 			// k8s handles these mounts. So just re-read the file and apply it
 			// if it's changed.
 		}
-		sc, err := readServeConfig(cfg.ServeConfigPath, certDomain)
-		if err != nil {
-			log.Fatalf("serve proxy: failed to read serve config: %v", err)
+		var (
+			sc  *ipn.ServeConfig
+			err error
+		)
+		if cfg.ServeConfigPath != "" {
+			sc, err = readServeConfig(cfg.ServeConfigPath, certDomain)
+			if err != nil {
+				log.Fatalf("serve proxy: failed to read serve config: %v", err)
+			}
+		} else if len(cfg.SimpleServeConfigs) > 0 {
+			sc, err = readSimpleServeConfig(cfg.SimpleServeConfigs, certDomain)
+			if err != nil {
+				log.Fatalf("serve proxy: failed to parse simple serve config: %v", err)
+			}
 		}
 		if sc == nil {
 			log.Printf("serve proxy: no serve config at %q, skipping", cfg.ServeConfigPath)
@@ -168,4 +184,143 @@ func readServeConfig(path, certDomain string) (*ipn.ServeConfig, error) {
 		return nil, err
 	}
 	return &sc, nil
+}
+
+// readSimpleServeConfig reads the ipn.ServeConfig from config string
+func readSimpleServeConfig(configs []string, certDomain string) (*ipn.ServeConfig, error) {
+	const (
+		invalidFunnelPortMessage  = "simpleserve: invalid funnel port (only 443, 8443 and 10000 are allowed): %d"
+		invalidProtoMessage       = "simpleserve: invalid %s proto in config: %s"
+		invalidTargetPortMessage  = "simpleserve: invalid target port in config: %s"
+		portAlreadyServingMessage = "simpleserve: want to serve '%s', but port %d is already serving '%s'"
+		invalidTargetURL          = "simpleserve: invalid target URL in config: %s"
+	)
+
+	var (
+		allowedProtos      = []string{"http", "https", "tcp"}
+		allowedFunnelPorts = []int{443, 8443, 10000}
+	)
+
+	if len(configs) == 0 {
+		return nil, nil
+	}
+
+	tcpConfig := make(map[uint16]*ipn.TCPPortHandler)
+	webConfig := make(map[ipn.HostPort]*ipn.WebServerConfig)
+	allowFunnel := make(map[ipn.HostPort]bool)
+
+	for _, config := range configs {
+		port := 443
+		enableFunnel := false
+		proto := "https"
+		terminateTLS := false
+		path := "/"
+
+		config, target, found := strings.Cut(config, ";")
+
+		if found {
+			configParts := strings.Split(config, " ")
+
+			for _, param := range configParts {
+				if param == "funnel" {
+					enableFunnel = true
+				} else if parsedPort, err := strconv.Atoi(param); err == nil {
+					port = parsedPort
+				} else if slices.Contains(allowedProtos, param) {
+					proto = param
+				} else if param == "tls" {
+					terminateTLS = true
+				} else if strings.HasPrefix(param, "/") {
+					path = param
+				}
+			}
+		} else {
+			target = config
+		}
+
+		uri, err := url.Parse(strings.TrimSpace(target))
+
+		if err != nil {
+			return nil, fmt.Errorf(invalidTargetURL, target)
+		}
+
+		if !slices.Contains(allowedProtos, uri.Scheme) {
+			return nil, fmt.Errorf(invalidProtoMessage, "target", target)
+		}
+
+		if enableFunnel && !slices.Contains(allowedFunnelPorts, port) {
+			return nil, fmt.Errorf(invalidFunnelPortMessage, port)
+		}
+
+		if !found && uri.Scheme == "tcp" {
+			proto = "tcp"
+
+			if uriPort, err := strconv.Atoi(uri.Port()); err == nil {
+				port = uriPort
+			} else {
+				return nil, fmt.Errorf(invalidTargetPortMessage, target)
+			}
+		}
+
+		hostPort := ipn.HostPort(fmt.Sprintf("%s:%d", certDomain, port))
+
+		if tcp, ok := tcpConfig[uint16(port)]; ok {
+			servedProto := "tcp"
+
+			if tcp.HTTPS {
+				servedProto = "https"
+			} else if tcp.HTTP {
+				servedProto = "http"
+			} else if tcp.TCPForward != "" {
+				servedProto = "tls-terminated-tcp"
+			}
+
+			if proto == "tcp" && terminateTLS {
+				proto = "tls-terminated-tcp"
+			}
+
+			return nil, fmt.Errorf(portAlreadyServingMessage, proto, port, servedProto)
+		}
+
+		switch proto {
+		case "http", "https":
+			webConfig[hostPort] = &ipn.WebServerConfig{
+				Handlers: map[string]*ipn.HTTPHandler{
+					path: {
+						Proxy: uri.String(),
+					},
+				},
+			}
+
+			tcpConfig[uint16(port)] = &ipn.TCPPortHandler{
+				HTTPS: proto == "https",
+				HTTP:  proto == "http",
+			}
+
+		case "tcp":
+			tlsHost := ""
+
+			if terminateTLS {
+				tlsHost = certDomain
+			}
+
+			tcpConfig[uint16(port)] = &ipn.TCPPortHandler{
+				TCPForward:   uri.Host,
+				TerminateTLS: tlsHost,
+			}
+
+		default:
+			return nil, fmt.Errorf(invalidProtoMessage, "serve", proto)
+		}
+
+		allowFunnel[hostPort] = enableFunnel
+	}
+
+	sc := &ipn.ServeConfig{
+		TCP:         tcpConfig,
+		Web:         webConfig,
+		AllowFunnel: allowFunnel,
+	}
+
+	return sc, nil
 }
