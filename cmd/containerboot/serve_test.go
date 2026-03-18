@@ -366,3 +366,129 @@ func TestHasHTTPSEndpoint(t *testing.T) {
 		})
 	}
 }
+
+func TestReadSimpleServeConfig(t *testing.T) {
+	certDomain := "example.com"
+
+	tests := []struct {
+		name      string
+		configs   []string
+		wantErr   bool
+		assertion func(t *testing.T, sc *ipn.ServeConfig)
+	}{
+		{
+			name:    "empty configs returns nil",
+			configs: nil,
+			wantErr: false,
+			assertion: func(t *testing.T, sc *ipn.ServeConfig) {
+				if sc != nil {
+					t.Fatalf("expected nil ServeConfig, got %#v", sc)
+				}
+			},
+		},
+		{
+			name:    "simple https config on default port",
+			configs: []string{"https://localhost:3000"},
+			assertion: func(t *testing.T, sc *ipn.ServeConfig) {
+				if sc == nil {
+					t.Fatal("expected ServeConfig, got nil")
+				}
+
+				if _, ok := sc.TCP[443]; !ok {
+					t.Fatalf("expected TCP config on port 443")
+				}
+
+				hp := ipn.HostPort("example.com:443")
+				web, ok := sc.Web[hp]
+				if !ok {
+					t.Fatalf("expected web config for %s", hp)
+				}
+
+				handler, ok := web.Handlers["/"]
+				if !ok {
+					t.Fatalf("expected handler for path '/'")
+				}
+
+				if handler.Proxy != "https://localhost:3000" {
+					t.Fatalf("unexpected proxy value: %s", handler.Proxy)
+				}
+
+				if sc.AllowFunnel[hp] {
+					t.Fatalf("funnel should be disabled by default")
+				}
+			},
+		},
+		{
+			name:    "https with funnel enabled",
+			configs: []string{"funnel; https://localhost:3000"},
+			assertion: func(t *testing.T, sc *ipn.ServeConfig) {
+				hp := ipn.HostPort("example.com:443")
+				if !sc.AllowFunnel[hp] {
+					t.Fatalf("expected funnel to be enabled")
+				}
+			},
+		},
+		{
+			name:    "custom allowed port tcp8443",
+			configs: []string{"8443; https://localhost:3000"},
+			assertion: func(t *testing.T, sc *ipn.ServeConfig) {
+				if _, ok := sc.TCP[8443]; !ok {
+					t.Fatalf("expected TCP config on port 8443")
+				}
+			},
+		},
+		{
+			name:    "invalid funnel port",
+			configs: []string{"funnel 9999; https://localhost:3000"},
+			wantErr: true,
+		},
+		{
+			name: "duplicate port conflict",
+			configs: []string{
+				"https://localhost:3000",
+				"https://localhost:4000",
+			},
+			wantErr: true,
+		},
+		{
+			name:    "invalid scheme",
+			configs: []string{"udp://localhost:3000"},
+			wantErr: true,
+		},
+		{
+			name:    "tcp forwarding config",
+			configs: []string{"tcp://127.0.0.1:22"},
+			assertion: func(t *testing.T, sc *ipn.ServeConfig) {
+				handler, ok := sc.TCP[22]
+				if !ok {
+					t.Fatalf("expected TCP handler on port 22")
+				}
+
+				if handler.TCPForward != "127.0.0.1:22" {
+					t.Fatalf("unexpected TCPForward value: %s", handler.TCPForward)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc, err := readSimpleServeConfig(tt.configs, certDomain)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if tt.assertion != nil {
+				tt.assertion(t, sc)
+			}
+		})
+	}
+}
